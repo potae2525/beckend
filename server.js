@@ -1,14 +1,14 @@
-//server.js
-require('dotenv').config(); // โหลดค่าจาก .env
-
+// server.js
+require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcrypt');
 const app = express();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ใช้ค่าจาก .env
+// ตั้งค่าการเชื่อมต่อฐานข้อมูล
 const db = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -16,7 +16,7 @@ const db = mysql.createPool({
   database: process.env.DB_NAME,
 });
 
-// Route ทดสอบการเชื่อมต่อ
+// ✅ ทดสอบเชื่อมต่อ DB
 app.get('/ping', async (req, res) => {
   try {
     const [rows] = await db.query('SELECT NOW() AS now');
@@ -27,93 +27,109 @@ app.get('/ping', async (req, res) => {
   }
 });
 
-// GET users
+// ✅ GET /users - ดึงผู้ใช้ทั้งหมด
 app.get('/users', async (req, res) => {
   try {
-    const [rows] = await db.query('SELECT * FROM tbl_users');
+    const [rows] = await db.query('SELECT id, firstname, fullname, lastname, username, status FROM tbl_users');
     res.json(rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Query failed' });
-  }
-}); 
-
-// GET /users/:id - ดึงข้อมูลผู้ใช้ตาม id
-app.get('/users/:id', async (req, res, next) => {
-  const { id } = req.params; // ดึง id จาก URL เช่น /users/3
-  try {
-    const [rows] = await db.query('SELECT * FROM tbl_users WHERE id = ?', [id]);
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    res.json(rows[0]); // ส่งผู้ใช้คนเดียวกลับไป
-  } catch (err) {
-    next(err);
   }
 });
 
-// ตัวอย่าง POST ข้อมูล
+// ✅ GET /users/:id - ดึงผู้ใช้ตาม id
+app.get('/users/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [rows] = await db.query('SELECT id, firstname, fullname, lastname, username, status FROM tbl_users WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Query failed' });
+  }
+});
+
+// ✅ POST /users - เพิ่มผู้ใช้ใหม่ พร้อม hash password
 app.post('/users', async (req, res) => {
   const { firstname, fullname, lastname, username, password, status } = req.body;
+
+  if (!firstname || !username || !password) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
   try {
-    const [result] = await db.query('INSERT INTO tbl_users (firstname, fullname, lastname, username, password, status) VALUES (?, ?, ?, ?, ?, ?)', [firstname, fullname, lastname, username, password, status]);
-    res.json({ id: result.insertId, firstname, fullname, lastname, username, password, status});
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const [result] = await db.query(
+      'INSERT INTO tbl_users (firstname, fullname, lastname, username, password, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [firstname, fullname, lastname, username, hashedPassword, status]
+    );
+
+    res.json({
+      message: 'User added successfully',
+      id: result.insertId,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Insert failed' });
   }
 });
 
-// PUT /users/:id - แก้ไขข้อมูลผู้ใช้
+// ✅ PUT /users/:id - แก้ไขผู้ใช้ พร้อม hash password
 app.put('/users/:id', async (req, res) => {
   const { id } = req.params;
+
+  if (!req.body || Object.keys(req.body).length === 0) {
+    return res.status(400).json({ error: 'No data provided in request body' });
+  }
+
   const { firstname, fullname, lastname, username, password, status } = req.body;
 
   try {
-    // อัปเดตข้อมูลใน database
-    const [result] = await db.query(
-      `UPDATE tbl_users 
-       SET firstname = ?, fullname = ?, lastname = ?, username = ?, password = ?, status = ? 
-       WHERE id = ?`,
-      [firstname, fullname, lastname, username, password, status, id]
-    );
+    const [exist] = await db.query('SELECT * FROM tbl_users WHERE id = ?', [id]);
+    if (exist.length === 0) return res.status(404).json({ message: 'User not found' });
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: 'User not found' });
+    let query = `UPDATE tbl_users 
+                 SET firstname = ?, fullname = ?, lastname = ?, username = ?, status = ?`;
+    const params = [firstname, fullname, lastname, username, status];
+
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      query += `, password = ?`;
+      params.push(hashedPassword);
     }
 
-    res.json({
-      id,
-      firstname,
-      fullname,
-      lastname,
-      username,
-      password,
-      status
-    });
+    query += ` WHERE id = ?`;
+    params.push(id);
+
+    const [result] = await db.query(query, params);
+    res.json({ message: 'User updated successfully' });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Update failed', message: err.message });
+    res.status(500).json({ error: 'Update failed' });
   }
 });
 
-// DELETE /users/:id - ลบผู้ใช้ตาม id
+// 🚫 PUT /users - ถ้าไม่มี id จะตอบกลับชัดเจน
+app.put('/users', (req, res) => {
+  res.status(400).json({ error: 'Please specify user ID, e.g. /users/1' });
+});
+
+// ✅ DELETE /users/:id - ลบผู้ใช้
 app.delete('/users/:id', async (req, res) => {
   const { id } = req.params;
-
   try {
     const [result] = await db.query('DELETE FROM tbl_users WHERE id = ?', [id]);
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
 
     res.json({ message: `User with id ${id} deleted successfully` });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Delete failed', message: err.message });
+    res.status(500).json({ error: 'Delete failed' });
   }
 });
 
-// เริ่มเซิร์ฟเวอร์
+// ✅ เริ่มเซิร์ฟเวอร์
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
